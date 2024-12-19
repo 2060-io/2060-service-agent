@@ -2,24 +2,32 @@ import { Module, DynamicModule } from '@nestjs/common'
 
 import { ConnectionsEventModule } from './connections'
 import { MessageEventModule } from './messages'
-
-export interface EventsModuleOptions {
-  prefix?: string
-  enableMessages?: boolean
-  enableConnections?: boolean
-}
+import { EventsModuleOptions } from './types'
 
 @Module({})
 export class EventsModule {
-  static register(options: EventsModuleOptions = {}): DynamicModule {
+  static register(options: EventsModuleOptions): DynamicModule {
     const imports = []
+    const { modules, options: moduleOptions } = options
 
-    if (options.enableMessages !== false) {
-      imports.push(MessageEventModule)
+    if (modules.messages && moduleOptions.eventHandler) {
+      imports.push(
+        MessageEventModule.forRoot({
+          eventHandler: moduleOptions.eventHandler,
+          imports: moduleOptions.imports ?? [],
+          url: moduleOptions.url,
+          version: moduleOptions.version,
+        }),
+      )
     }
 
-    if (options.enableConnections !== false) {
-      imports.push(ConnectionsEventModule)
+    if (modules.connections && moduleOptions.eventHandler) {
+      imports.push(
+        ConnectionsEventModule.forRoot({
+          eventHandler: moduleOptions.eventHandler,
+          imports: moduleOptions.imports ?? [],
+        }),
+      )
     }
 
     return {

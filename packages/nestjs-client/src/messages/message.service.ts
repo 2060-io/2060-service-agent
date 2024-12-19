@@ -1,11 +1,20 @@
 import { ApiClient, ApiVersion } from '@2060.io/service-agent-client'
-import { MessageReceived, ReceiptsMessage } from '@2060.io/service-agent-model'
+import {
+  CredentialReceptionMessage,
+  CredentialState,
+  MessageReceived,
+  ReceiptsMessage,
+} from '@2060.io/service-agent-model'
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common'
+import { InjectRepository } from '@nestjs/typeorm'
 import { MessageState } from 'credo-ts-receipts'
+import { Repository } from 'typeorm'
 
+import { ConnectionsRepository } from '../connections'
 import { EventHandler } from '../interfaces'
 
 import { MESSAGE_EVENT, MESSAGE_MODULE_OPTIONS, MessageModuleOptions } from './message.config'
+import { CredentialEntity } from '../credentials'
 
 @Injectable()
 export class MessageEventService {
@@ -16,6 +25,9 @@ export class MessageEventService {
 
   constructor(
     @Inject(MESSAGE_MODULE_OPTIONS) private options: MessageModuleOptions,
+    @InjectRepository(CredentialEntity)
+    private readonly credentialRepository: Repository<CredentialEntity>,
+    private readonly connectionRepository: ConnectionsRepository,
     @Optional() @Inject(MESSAGE_EVENT) private eventHandler?: EventHandler,
   ) {
     this.url = options.url
@@ -42,6 +54,31 @@ export class MessageEventService {
     await this.apiClient.messages.send(body)
 
     if (this.eventHandler) {
+      if (event.message instanceof CredentialReceptionMessage) {
+        try {
+          const [credential] = await this.apiClient.credentialTypes.getAll()
+          const connectionId = await this.connectionRepository.findById(event.message.connectionId)
+          const hash = Buffer.from(await this.eventHandler.credentialHash(event.message.connectionId))
+          const currentCred = await this.credentialRepository.findOneBy({ hash })
+          const isCredentialDone = event.message.state === CredentialState.Done
+
+          if (connectionId && isCredentialDone) {
+            if (!currentCred) {
+              const credentialRev = this.credentialRepository.create({
+                connectionId,
+                hash,
+                revocationDefinitionId: credential.revocationId,
+              })
+              await this.credentialRepository.save(credentialRev)
+            } else {
+              this.credentialRepository.update(currentCred.id, { connectionId })
+            }
+          }
+        } catch (error) {
+          this.logger.error(`Cannot create the registry: ${error}`)
+        }
+      }
+
       await this.eventHandler.inputMessage(event.message)
     }
   }

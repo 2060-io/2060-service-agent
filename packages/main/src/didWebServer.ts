@@ -7,8 +7,21 @@ import {
   AnonCredsRevocationRegistryDefinitionRepository,
   AnonCredsSchemaRepository,
 } from '@credo-ts/anoncreds'
+import { type AgentContext, Buffer, Key, KeyType } from '@credo-ts/core'
+import * as crypto from '@stablelib/ed25519'
 import cors from 'cors'
 import { createHash } from 'crypto'
+import {
+  AbstractCrypto,
+  multibaseDecode,
+  multibaseEncode,
+  MultibaseEncoding,
+  prepareDataForSigning,
+  resolveDID,
+  SigningInput,
+  VerificationMethod,
+  type SigningOutput,
+} from 'didwebvh-ts'
 import express from 'express'
 import fs from 'fs'
 import multer, { diskStorage } from 'multer'
@@ -82,6 +95,21 @@ export const addDidWebRoutes = async (
       const didDocument = didRecord.didDocument
       if (didDocument) {
         res.send(didDocument.toJSON())
+      } else {
+        res.status(500).end()
+      }
+    } else {
+      res.status(404).end()
+    }
+  })
+
+  app.get('/.well-known/did.jsonl', async (req, res) => {
+    agent.config.logger.info(`Public DidDocument requested`)
+    if (agent.did) {
+      const crypto = new DIDWebvhCrypto(agent.context)
+      const { doc: didDocument } = await resolveDID(agent.did, { verifier: crypto })
+      if (didDocument) {
+        res.send(didDocument)
       } else {
         res.status(500).end()
       }
@@ -273,5 +301,110 @@ export const addDidWebRoutes = async (
         res.status(200).end()
       },
     )
+  }
+}
+
+export class DIDWebvhCrypto extends AbstractCrypto {
+  private agentContext: AgentContext
+
+  public constructor(agentContext: AgentContext, verificationMethod?: VerificationMethod) {
+    super({
+      verificationMethod: verificationMethod ?? {
+        id: 'did:webvh:z6MktMfquhE3nUbEMNQey6BfjLTA16R61dMTNbpLXJ8zdxwh',
+        controller: 'did:webvh:z6MktMfquhE3nUbEMNQey6BfjLTA16R61dMTNbpLXJ8zdxwh',
+        type: 'Ed25519VerificationKey2020',
+        publicKeyMultibase: 'z6MktMfquhE3nUbEMNQey6BfjLTA16R61dMTNbpLXJ8zdxwh',
+        secretKeyMultibase:
+          'zrv1v7LscnqobKumZEULSjiwFyeZPZSUBDqyDraQtmfsGkLwMVMCQc3PPh3wUkTBV1yqCx2DmyHzfq1p8yoTRzaPLhM',
+      },
+    })
+    this.agentContext = agentContext
+  }
+
+  public static async create(agentContext: AgentContext): Promise<DIDWebvhCrypto> {
+    const verificationMethod = await generateTestVerificationMethod()
+    return new DIDWebvhCrypto(agentContext, verificationMethod)
+  }
+
+  public getVerificationMethod(): VerificationMethod {
+    return this.verificationMethod
+  }
+
+  public async sign(input: SigningInput): Promise<SigningOutput> {
+    try {
+      if (!this.agentContext) {
+        throw new Error('Agent context is required')
+      }
+      if (!this.verificationMethod.secretKeyMultibase) {
+        throw new Error('secretKeyMultibase is required')
+      }
+
+      const decoded = multibaseDecode(this.verificationMethod.secretKeyMultibase).bytes
+      const key = await this.agentContext.wallet.createKey({
+        privateKey: Buffer.from(decoded.slice(2).slice(0, 32)),
+        keyType: KeyType.Ed25519,
+      })
+      const data = await prepareDataForSigning(input.document, input.proof)
+      const signature = await this.agentContext.wallet.sign({
+        key,
+        data: Buffer.from(data),
+      })
+
+      return {
+        proofValue: multibaseEncode(signature, MultibaseEncoding.BASE58_BTC),
+      }
+    } catch (error) {
+      // Log error in a non-production environment
+      if (process.env.NODE_ENV !== 'production') {
+        this.agentContext.config.logger.error('Error sign signature:', error)
+      }
+      throw new Error(`Failed to sign message: ${error instanceof Error ? error.message : 'Unknown error'}`)
+    }
+  }
+
+  public async verify(signature: Uint8Array, message: Uint8Array, publicKey: Uint8Array): Promise<boolean> {
+    try {
+      if (!this.agentContext) {
+        throw new Error('Agent context is required')
+      }
+
+      const key = new Key(publicKey, KeyType.Ed25519)
+      return await this.agentContext.wallet.verify({
+        key,
+        data: Buffer.from(message),
+        signature: Buffer.from(signature),
+      })
+    } catch (error) {
+      // Log error in a non-production environment
+      if (process.env.NODE_ENV !== 'production') {
+        this.agentContext.config.logger.error('Error verifying signature:', error)
+      }
+      return false
+    }
+  }
+}
+
+export async function generateTestVerificationMethod(
+  purpose:
+    | 'authentication'
+    | 'assertionMethod'
+    | 'keyAgreement'
+    | 'capabilityInvocation'
+    | 'capabilityDelegation' = 'authentication',
+): Promise<VerificationMethod> {
+  const keyPair = crypto.generateKeyPair()
+  const secretKey = multibaseEncode(
+    new Uint8Array([0x80, 0x26, ...keyPair.secretKey]),
+    MultibaseEncoding.BASE58_BTC,
+  )
+  const publicKey = multibaseEncode(
+    new Uint8Array([0xed, 0x01, ...keyPair.publicKey]),
+    MultibaseEncoding.BASE58_BTC,
+  )
+  return {
+    type: 'Multikey',
+    publicKeyMultibase: publicKey,
+    secretKeyMultibase: secretKey,
+    purpose,
   }
 }
